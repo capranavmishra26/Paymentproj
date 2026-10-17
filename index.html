@@ -115,6 +115,11 @@
   .modal-box{background:#fff;border-radius:12px;padding:18px;max-width:760px;width:100%;max-height:90vh;overflow:auto}
   .modal-box h3{margin:0 0 10px}
   .modal-box img{width:100%;border:1px solid var(--line);border-radius:8px;margin-bottom:10px}
+  .opened{background:var(--accent-soft);color:var(--accent);border-radius:6px;padding:6px 10px;margin-bottom:8px;font-size:13px}
+  .modal-box.wide{max-width:1100px}
+  .svlist td .btns{flex-wrap:nowrap;gap:4px}
+  .svlist td button{padding:3px 8px;font-size:12px}
+  .svlist .neg{color:var(--pay)}
   .toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:#1c2430;color:#fff;padding:10px 16px;border-radius:8px;z-index:30;font-weight:600;opacity:0;transition:opacity .2s;pointer-events:none}
   .toast.show{opacity:1}
   @media (max-width:640px){ main{padding:12px 16px} header{padding:12px 16px} }
@@ -127,6 +132,8 @@
     <div class="credit">Created by CA Pranav Mishra</div>
   </div>
   <div class="btns">
+    <button id="btnSave" title="Save this projection (Ctrl+S)">💾 Save</button>
+    <button id="btnSaved" title="See and open projections saved earlier">📂 Saved</button>
     <button id="btnExcel">⬇ Download Excel</button>
     <button id="btnImg">🖼 Download Image</button>
     <button id="btnWa">WhatsApp</button>
@@ -172,6 +179,7 @@
         <button class="danger" id="btnClear">Reset to cash flow averages</button>
       </div>
     </div>
+    <div class="opened" id="openedLbl" hidden></div>
     <div class="sheetwrap"><table class="pj" id="pj"></table></div>
     <div class="legend">
       <i style="background:var(--yellow)"></i>changed by you / to confirm
@@ -258,6 +266,29 @@
     <p id="mdMsg"></p>
     <div class="btns" id="mdBtns"></div>
     <div class="btns" style="margin-top:12px;justify-content:flex-end"><button id="mdClose">Close</button></div>
+  </div>
+</div>
+<div class="modal" id="svModal" hidden>
+  <div class="modal-box wide">
+    <h3>Saved projections</h3>
+    <div class="grid" style="margin-bottom:10px">
+      <label>Saved on (date) <input id="svDate" type="date"></label>
+      <label>Search remark <input id="svFind" placeholder="e.g. weekly review"></label>
+      <div style="display:flex;align-items:flex-end"><button id="svAll">Show all</button></div>
+    </div>
+    <div class="tablewrap"><table class="list svlist">
+      <thead><tr><th>Saved on</th><th>Remark</th><th>Projection period</th><th class="num">Opening</th><th class="num">Collection</th><th class="num">Payments</th><th class="num">Closing</th><th class="num">Max fund required</th><th></th></tr></thead>
+      <tbody id="svBody"></tbody>
+    </table></div>
+    <div class="status" id="svStatus"></div>
+    <div class="btns" style="margin-top:12px;justify-content:space-between">
+      <div class="btns">
+        <button id="svBackup" title="Keep a copy of all saves as a file (safe if browser data is cleared, or to move to another PC)">⬇ Backup all saves to file</button>
+        <button id="svRestore">⬆ Restore from backup file</button>
+        <input id="svFile" type="file" accept=".json" hidden>
+      </div>
+      <button id="svClose">Close</button>
+    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -933,6 +964,7 @@ $('#btnSort').addEventListener('click', () => {
 });
 $('#btnClear').addEventListener('click', () => {
   if (!confirm('Reset all payment lines to the cash flow averages? Your changed names, dates and amounts will be lost (opening balance is kept).')) return;
+  state.opened = null;
   if (!state.files.length && window.PRELOAD) loadPreload();
   else { state.otherPct = defaults().otherPct; rebuildFromFiles(); }
   toast('Reset to cash flow averages');
@@ -949,7 +981,7 @@ function loadPreload(){
   rebuildFromFiles();
 }
 
-function renderAll(){ renderSettings(); renderFiles(); renderPatterns(); renderGrid(); }
+function renderAll(){ renderSettings(); renderFiles(); renderPatterns(); renderGrid(); renderOpened(); }
 
 /* ---------- static copy for the image ---------- */
 function buildCapture(){
@@ -1168,6 +1200,106 @@ $('#btnWa').addEventListener('click', () => share('wa'));
 $('#btnOl').addEventListener('click', () => share('ol'));
 $('#mdClose').addEventListener('click', () => $('#modal').hidden = true);
 $('#modal').addEventListener('click', e => { if (e.target.id === 'modal') $('#modal').hidden = true; });
+
+/* ---------- saved projections (snapshots kept in this browser, with file backup) ---------- */
+const SAVES_KEY = 'fundProjection.saves.v1';
+const SNAP_KEYS = ['company','opening','startDate','days','collPerDay','collOverride','entries','removed'];
+const copyOf = o => JSON.parse(JSON.stringify(o));
+const takeSnap = () => copyOf(Object.fromEntries(SNAP_KEYS.map(k => [k, state[k]])));
+const loadSaves = () => { try { return JSON.parse(localStorage.getItem(SAVES_KEY)) || []; } catch(e){ return []; } };
+function storeSaves(list){
+  try { localStorage.setItem(SAVES_KEY, JSON.stringify(list)); return true; }
+  catch(e){ toast('Could not save – browser storage is full. Backup to file and delete old saves.'); return false; }
+}
+const fmtStamp = t => { const d = new Date(t); return `${fmtDate(iso(d))} ${pad(d.getHours())}:${pad(d.getMinutes())}`; };
+
+function saveSnapshot(){
+  const c = compute();
+  const note = prompt(`Save this projection (${fmtDate(c.days[0])} to ${fmtDate(c.days[c.N-1])})\n\nRemark (optional):`, '');
+  if (note === null) return;
+  const snap = { id:uid(), savedAt:new Date().toISOString(), note:note.trim(), unit:state.unit, ...takeSnap(),
+    sum:{ coll:c.tot.coll, pay:c.tot.pay, close:c.tot.close, need: c.firstNeg >= 0 ? -c.close[c.minI] : 0 } };
+  const list = loadSaves(); list.push(snap);
+  if (!storeSaves(list)) return;
+  state.opened = { savedAt:snap.savedAt, note:snap.note }; save(); renderOpened();
+  toast(`Saved on ${fmtStamp(snap.savedAt)}`);
+}
+
+// put a saved projection on screen, converted to the unit currently selected
+function applySnap(s){
+  const f = UNIT_F[s.unit] / UNIT_F[state.unit], cp = copyOf(s);
+  SNAP_KEYS.forEach(k => { if (k in cp) state[k] = cp[k]; });
+  if (f !== 1) {
+    state.opening = r2(state.opening * f); state.collPerDay = r2(state.collPerDay * f);
+    for (const d in state.collOverride) state.collOverride[d] = r2(state.collOverride[d] * f);
+    state.entries.forEach(x => x.amount = r2(x.amount * f));
+  }
+}
+// run fn (e.g. Excel export) on a saved projection without changing the screen
+function withSnap(s, fn){
+  const keep = takeSnap();
+  applySnap(s);
+  try { fn(); } finally { Object.assign(state, keep); }
+}
+
+function renderOpened(){
+  const o = state.opened, el = $('#openedLbl');
+  el.hidden = !o;
+  if (o) el.innerHTML = `Opened from save of <b>${fmtStamp(o.savedAt)}</b>${o.note ? ' – ' + esc(o.note) : ''}. Changes are not stored in that save until you click 💾 Save again (a new save is created).`;
+}
+
+function renderSaves(){
+  const fd = $('#svDate').value, q = $('#svFind').value.trim().toLowerCase();
+  const all = loadSaves().sort((a,b) => b.savedAt.localeCompare(a.savedAt));
+  const rows = all.filter(s => (!fd || iso(new Date(s.savedAt)) === fd) && (!q || (s.note || '').toLowerCase().includes(q)));
+  const n = v => `<td class="num ${v < -0.004 ? 'neg' : ''}">${fmtA(v)}</td>`;
+  $('#svBody').innerHTML = rows.length ? rows.map(s => {
+    const f = UNIT_F[s.unit] / UNIT_F[state.unit];
+    return `<tr data-id="${s.id}"><td>${fmtStamp(s.savedAt)}</td><td>${esc(s.note || '')}</td>
+      <td>${fmtDate(s.startDate)} to ${fmtDate(addDays(s.startDate, s.days - 1))}</td>
+      ${n(s.opening * f)}${n(s.sum.coll * f)}${n(s.sum.pay * f)}${n(s.sum.close * f)}
+      <td class="num ${s.sum.need ? 'neg' : ''}">${s.sum.need ? fmt(s.sum.need * f) : '-'}</td>
+      <td><div class="btns"><button class="primary" data-sv="open">Open</button><button data-sv="xl">⬇ Excel</button><button class="danger" data-sv="del">Delete</button></div></td></tr>`;
+  }).join('') : `<tr><td colspan="9" style="color:var(--muted)">${all.length ? 'No saves match this date / remark.' : 'Nothing saved yet — click 💾 Save at the top to save the current projection.'}</td></tr>`;
+  $('#svStatus').textContent = `${rows.length} of ${all.length} save(s) shown · amounts in ${state.unit}`;
+}
+function openSaves(){ $('#svModal').hidden = false; renderSaves(); }
+
+$('#btnSave').addEventListener('click', saveSnapshot);
+$('#btnSaved').addEventListener('click', openSaves);
+document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') { e.preventDefault(); saveSnapshot(); } });
+$('#svDate').addEventListener('input', renderSaves);
+$('#svFind').addEventListener('input', renderSaves);
+$('#svAll').addEventListener('click', () => { $('#svDate').value = ''; $('#svFind').value = ''; renderSaves(); });
+$('#svClose').addEventListener('click', () => $('#svModal').hidden = true);
+$('#svModal').addEventListener('click', e => { if (e.target.id === 'svModal') $('#svModal').hidden = true; });
+$('#svBody').addEventListener('click', e => {
+  const act = e.target.dataset.sv; if (!act) return;
+  const id = e.target.closest('tr').dataset.id, list = loadSaves(), s = list.find(x => x.id === id); if (!s) return;
+  if (act === 'open') {
+    if (!confirm(`Open the projection saved on ${fmtStamp(s.savedAt)}?\nThe projection now on screen will be replaced — save it first if you need it.`)) return;
+    applySnap(s); state.opened = { savedAt:s.savedAt, note:s.note }; save();
+    $('#svModal').hidden = true; renderAll(); toast(`Opened save of ${fmtStamp(s.savedAt)}`);
+  } else if (act === 'xl') withSnap(s, exportExcel);
+  else if (act === 'del') {
+    if (!confirm(`Delete the projection saved on ${fmtStamp(s.savedAt)}? This cannot be undone.`)) return;
+    storeSaves(list.filter(x => x.id !== id)); renderSaves();
+  }
+});
+$('#svBackup').addEventListener('click', () => {
+  const list = loadSaves(); if (!list.length) return toast('Nothing saved yet');
+  download(new Blob([JSON.stringify({ app:'fund-projection', saves:list }, null, 1)], { type:'application/json' }), `Fund_Projection_Saves_${todayISO()}.json`);
+});
+$('#svRestore').addEventListener('click', () => $('#svFile').click());
+$('#svFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const data = JSON.parse(await f.text()), inc = Array.isArray(data) ? data : data.saves;
+    if (!Array.isArray(inc) || !inc.every(s => s && s.id && s.savedAt && s.entries)) throw new Error('not a Fund Projection backup file');
+    const list = loadSaves(), have = new Set(list.map(s => s.id)), add = inc.filter(s => !have.has(s.id));
+    if (storeSaves(list.concat(add))) { renderSaves(); toast(`${add.length} save(s) restored${inc.length > add.length ? `, ${inc.length - add.length} already here` : ''}`); }
+  } catch(err) { toast('Could not restore: ' + err.message); }
+});
 
 // installable app (when served over http/https; the desktop shortcut works without it)
 if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
